@@ -15,9 +15,6 @@ mod ssdb{
         Nil,
         Int(String,i64),
         Data(String,Vec<u8>)
-        //List(&[Result]),
-        //Error(&str),
-        //Status(&str)
     }
 
     pub struct Client<S:Read+Write>{
@@ -28,7 +25,6 @@ mod ssdb{
 
     fn invalid_input(desc: &'static str, detail: &str) -> Error {
         Error::new(ErrorKind::InvalidInput, desc)
-        // {kind: InvalidInput, desc: desc, detail: Some(String::from_str(detail))}
     }
 
     fn read_byte<S: Read+Write>(stream:&mut BufStream<S>) ->Result<u8>{
@@ -45,8 +41,8 @@ mod ssdb{
         let l = &mut String::new();
         stream.read_line(l);
         let len=match l.trim().as_ref(){
-            ""=>{return Ok("".to_string());0},
-            _=>{l.trim().parse::<usize>().unwrap()}
+            ""=>{return Ok("".to_string())},
+            _=>{l.trim().parse::<usize>().unwrap_or(0)}
         };
         let mut s = vec![];
         s.reserve(len);
@@ -55,18 +51,14 @@ mod ssdb{
         }
         read_byte(stream);
         
-        Ok(String::from_utf8(s).unwrap())
+        Ok(String::from_utf8(s).unwrap_or(String::new()))
     }
     
     pub fn read_status<S: Read+Write>(stream: &mut BufStream<S>)->Result<()> {
-        let resp=read_item(stream).unwrap();
-        match resp.as_ref() {
+        match read_item(stream).unwrap_or("".to_owned()).as_ref(){
             "ok"=>Ok(()),
-            _=>Err(invalid_input("Operation failed!",resp.as_ref()))
+            resp@_=>Err(invalid_input("Operation failed!", resp.as_ref()))
         }
-        //if resp.as_ref()!="ok" {
-        //    return Err(invalid_input("Operation failed!",resp.as_ref()));
-        //}
     }
     
     impl Client<TcpStream>{
@@ -79,30 +71,28 @@ mod ssdb{
                         writeln!(stream,"{}",item);
                     }
                     writeln!(stream,"");
-                    //println!("data:{}",String::from_utf8(bufwriter.unwrap()).unwrap().as_slice());
-                    //stream.write(bufwriter.unwrap().as_slice());
                     try!(stream.flush());
-                    //try!(read_status(stream));//read_item(stream).unwrap();
                     loop{
-                        let s=try!(read_item(stream));//try!(stream.read_line());
+                        let s=try!(read_item(stream));
                         if s=="" { break; }
                         v.push(s); 
                     }
                 },
-                _ =>{}
+                _ =>{panic!("Connect not open!");}
             }
             Ok(v)
         }
         
         pub fn send_req(&mut self, cmd:&str, param:Vec<&str>)->Vec<String>{
+                        
             match self.stream{
                 Some(ref mut stream) =>{
                     writeln!(stream, "{}", cmd.len());
                     writeln!(stream, "{}", cmd);
                 },
-                None => {}
+                _ => {panic!("Connect not open!");}
             }
-            self.send(param).unwrap()
+            self.send(param).unwrap_or(vec![])
         }
 
         pub fn parse(&mut self, cmd:&str, resp:Vec<String>)->SSDBResult{
@@ -115,7 +105,7 @@ mod ssdb{
                     | "multi_set" | "multi_del" | "multi_hset" | "multi_hdel" | "multi_zset" | "multi_zdel"
                     | "incr" | "decr" | "zincr" | "zdecr" | "hincr" | "hdecr"
                     | "zget" | "zrank" | "zrrank" | "zcount" | "zsum" | "zremrangebyrank" | "zremrangebyscore" 
-                    =>SSDBResult::Int(resp[0].clone(), resp[1].parse::<i64>().unwrap()),
+                    =>SSDBResult::Int(resp[0].clone(), resp[1].parse::<i64>().unwrap_or(0)),
                 "get"=>SSDBResult::Data(resp[0].clone(), resp[1].clone().into_bytes()),
                 _ =>SSDBResult::Nil
             }
@@ -132,13 +122,14 @@ mod ssdb{
         }
 
         pub fn new(ip:&str,port:i32)->Client<TcpStream>{
-            Client{ip:ip.to_string(), 
+            Client{
+                ip:ip.to_string(), 
                 port:port as u16,
-                stream:None
+                stream:None,
             }
         }
 
-        pub fn connect(&mut self) {
+        pub fn connect(&mut self){
             if !self.stream.is_none(){
                 panic!("can not call connect() twice!");
             }
@@ -150,26 +141,37 @@ mod ssdb{
 
         pub fn close(&mut self){
             match self.stream {
-                Some(ref mut stream) =>{ drop(stream)},
-                None =>{}
+                Some(ref mut stream) =>{ stream.flush(); },
+                _ =>{}
             }
+            self.stream=None; 
         }
+        
     }
 }
 
 #[test]
 fn it_works() {
+    use std::thread;
+    
+    let mut handles=vec![];
     
     //Require ssdb daemon running
-    
-    let mut foo = ssdb::Client::new("127.0.0.1",8888);
-    foo.connect();
-    
-    foo.set("测试","foo");
-    let resp=match foo.get("测试"){ssdb::SSDBResult::Data(_,resp)=>resp,_=>vec![]};
+    for i in 0..3{
+        let h=thread::spawn(move ||{
+            let key="测试".to_owned()+i.to_string().as_ref();
+            let mut foo=ssdb::Client::new("127.0.0.1",8888);
+            foo.connect();
+            foo.set(key.as_ref(),"foo");
+            let resp=match foo.get(key.as_ref()){ssdb::SSDBResult::Data(_,resp)=>resp,_=>vec![]};
+            assert!(String::from_utf8(resp).unwrap()=="foo");
+            foo.close();
+        });
+        handles.push(h);
+    }
+    for h in handles{
+        h.join(); 
+    }
     //println!("{:?}",String::from_utf8(resp).unwrap());
-    
-    assert!(String::from_utf8(resp).unwrap()=="foo");
-    
-    foo.close();
+    //foo.set("测试","foo");
 }
